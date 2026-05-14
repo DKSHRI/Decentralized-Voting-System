@@ -740,21 +740,21 @@ class AdminTools {
       }
 
       // Truffle-contract wrapper path
+      let txResult = null;
       if (window.App.voting.addCandidate?.estimateGas) {
         const gas = await window.App.voting.addCandidate.estimateGas(name, party, { from: window.App.account });
-        await window.App.voting.addCandidate(name, party, { from: window.App.account, gas });
+        txResult = await window.App.voting.addCandidate(name, party, { from: window.App.account, gas });
       } else if (window.App.voting.methods?.addCandidate) {
         // web3 Contract path
         const method = window.App.voting.methods.addCandidate(name, party);
         const gas = await method.estimateGas({ from: window.App.account });
-        await method.send({ from: window.App.account, gas });
+        txResult = await method.send({ from: window.App.account, gas });
       } else {
         throw new Error('Contract method addCandidate is unavailable. Redeploy contract and refresh.');
       }
 
-      const newIdRaw = await window.App.readCountCandidates();
-      const candidate_id = Number(newIdRaw);
-      if (!candidate_id) throw new Error('Could not read candidate id after transaction.');
+      const candidate_id = Number(window.App.extractCandidateIdFromAddCandidateTx?.(txResult) || 0);
+      if (!candidate_id) throw new Error('Could not read candidate id from transaction receipt.');
 
       // Refresh admin-side candidate list (best effort).
       try {

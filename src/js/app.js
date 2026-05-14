@@ -154,18 +154,25 @@ window.App = {
             return;
           }
           try {
-            await this.sendAddCandidateTx(nameCandidate, partyCandidate);
+            const txResult = await this.sendAddCandidateTx(nameCandidate, partyCandidate);
             // Persist candidate to MongoDB so the voter page can read the latest list.
             try {
-              const newIdRaw = await this.readCountCandidates();
-              const newId = Number(newIdRaw);
-              await fetch(`${API_BASE}/admin/candidates`, {
+              const newId = this.extractCandidateIdFromAddCandidateTx(txResult);
+              if (!newId) {
+                throw new Error('CandidateAdded event was not found in transaction receipt.');
+              }
+              const res = await fetch(`${API_BASE}/admin/candidates`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ candidate_id: newId, name: nameCandidate, party: partyCandidate }),
               });
+              if (!res.ok) {
+                const text = await res.text();
+                throw new Error(text || `Candidate API failed: HTTP ${res.status}`);
+              }
             } catch (e) {
               console.warn('DB candidate sync failed:', e);
+              alert(`Candidate was added on-chain, but could not be saved for vote.html: ${e?.message || e}`);
             }
             $('#name').val('');
             $('#party').val('');
@@ -399,6 +406,32 @@ window.App = {
     } catch {
       return null;
     }
+  },
+
+  extractCandidateIdFromAddCandidateTx: function (txResult) {
+    const directEvent = txResult?.events?.CandidateAdded;
+    const returnValues = Array.isArray(directEvent) ? directEvent[0]?.returnValues : directEvent?.returnValues;
+    const directId = this.normalizeUint(returnValues?.id || returnValues?.[0]);
+    if (directId) return Number(directId);
+
+    const decodedLogs = Array.isArray(txResult?.logs) ? txResult.logs : [];
+    for (const log of decodedLogs) {
+      if (log?.event !== 'CandidateAdded') continue;
+      const id = this.normalizeUint(log?.args?.id || log?.args?.[0]);
+      if (id) return Number(id);
+    }
+
+    const rawLogs = [
+      ...(Array.isArray(txResult?.receipt?.logs) ? txResult.receipt.logs : []),
+      ...(Array.isArray(txResult?.logs) ? txResult.logs : []),
+    ];
+    for (const log of rawLogs) {
+      const decoded = this.decodeEventLog(log, 'CandidateAdded');
+      const id = this.normalizeUint(decoded?.id || decoded?.[0]);
+      if (id) return Number(id);
+    }
+
+    return 0;
   },
 
   resolveCandidateMeta: async function (candidateID) {
