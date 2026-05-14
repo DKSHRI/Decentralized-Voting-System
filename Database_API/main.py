@@ -877,7 +877,7 @@ async def list_candidates():
     try:
         onchain_candidates = get_onchain_candidate_results()
         onchain_votes = {item["candidate_id"]: item["vote_count"] for item in onchain_candidates}
-    except HTTPException:
+    except Exception:
         onchain_candidates = []
         onchain_votes = {}
 

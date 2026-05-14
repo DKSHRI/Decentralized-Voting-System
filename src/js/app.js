@@ -730,11 +730,16 @@ window.App = {
             </tr>`;
           $('#boxCandidate').append(row);
         }
-        if (items.length > 0 || isVoterPage) {
-          return;
+        if (items.length === 0) {
+          $('#boxCandidate').html(
+            isVoterPage
+              ? '<div style="padding:12px;color:#111827;font-weight:700;">No candidates available.</div>'
+              : '<tr><td colspan="3">No candidates available.</td></tr>'
+          );
         }
+        return;
       } catch (e) {
-        console.warn('Failed to load candidates from DB; falling back to blockchain:', e);
+        console.warn('Failed to load candidates from DB; falling back to blockchain for admin/explorer only:', e);
         if (isVoterPage) {
           throw e;
         }
