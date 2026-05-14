@@ -365,6 +365,66 @@ def get_onchain_candidate_results():
     return results
 
 
+def get_database_vote_report_items(source="database"):
+    live_rows = list(coll("vote_report_live").find({}, {"_id": 0}).sort([("vote_count", DESCENDING), ("candidate_id", ASCENDING)]))
+    if live_rows:
+        return [
+            {
+                "candidate_id": row.get("candidate_id"),
+                "candidate_name": row.get("candidate_name"),
+                "party": row.get("party"),
+                "vote_count": int(row.get("vote_count", 0) or 0),
+                "rank_position": index,
+                "updated_at": stringify_datetime(row.get("updated_at") or row.get("last_vote_at") or utc_now()),
+                "source": source,
+            }
+            for index, row in enumerate(live_rows, start=1)
+        ]
+
+    audit_pipeline = [
+        {
+            "$group": {
+                "_id": {
+                    "candidate_id": "$candidate_id",
+                    "candidate_name": "$candidate_name",
+                    "party": "$party",
+                },
+                "vote_count": {"$sum": 1},
+                "updated_at": {"$max": "$voted_at"},
+            }
+        },
+        {"$sort": {"vote_count": -1, "_id.candidate_id": 1}},
+    ]
+    audit_rows = list(coll("vote_audit").aggregate(audit_pipeline))
+    if audit_rows:
+        return [
+            {
+                "candidate_id": row.get("_id", {}).get("candidate_id"),
+                "candidate_name": row.get("_id", {}).get("candidate_name"),
+                "party": row.get("_id", {}).get("party"),
+                "vote_count": int(row.get("vote_count", 0) or 0),
+                "rank_position": index,
+                "updated_at": stringify_datetime(row.get("updated_at") or utc_now()),
+                "source": source,
+            }
+            for index, row in enumerate(audit_rows, start=1)
+        ]
+
+    candidates = list(coll("candidates").find({}, {"_id": 0}).sort("candidate_id", ASCENDING))
+    return [
+        {
+            "candidate_id": row.get("candidate_id"),
+            "candidate_name": row.get("name") or row.get("candidate_name"),
+            "party": row.get("party"),
+            "vote_count": 0,
+            "rank_position": index,
+            "updated_at": stringify_datetime(row.get("updated_at") or utc_now()),
+            "source": source,
+        }
+        for index, row in enumerate(candidates, start=1)
+    ]
+
+
 def verify_vote_tx_hash(tx_hash, expected_candidate_id):
     clean_hash = str(tx_hash or "").strip()
     if not clean_hash or not clean_hash.startswith("0x"):
@@ -1363,7 +1423,20 @@ async def save_vote_audit(request: Request):
 
 @app.get("/vote/report")
 async def get_vote_report():
-    rows = get_onchain_candidate_results()
+    try:
+        rows = get_onchain_candidate_results()
+    except HTTPException as error:
+        return {
+            "items": get_database_vote_report_items(source="database-fallback"),
+            "source": "database-fallback",
+            "chain_error": error.detail,
+        }
+    except Exception as error:
+        return {
+            "items": get_database_vote_report_items(source="database-fallback"),
+            "source": "database-fallback",
+            "chain_error": str(error),
+        }
     return {
         "items": [
             {
@@ -1376,7 +1449,8 @@ async def get_vote_report():
                 "source": "blockchain",
             }
             for index, row in enumerate(rows, start=1)
-        ]
+        ],
+        "source": "blockchain",
     }
 
 

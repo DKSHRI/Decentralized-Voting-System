@@ -20,7 +20,9 @@ const runtimeConfig = {
   apiBase: String(process.env.FRONTEND_API_BASE || '').trim(),
   rpcUrl: String(process.env.RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com').trim(),
   chainId: String(process.env.CHAIN_ID || '11155111').trim(),
-  votingAddress: String(process.env.VOTING_CONTRACT_ADDRESS || '').trim(),
+  // The Express /js/runtime-config.js route injects VOTING_CONTRACT_ADDRESS at request time.
+  // Keep the generated file address-free so contract addresses are not baked into source.
+  votingAddress: '',
 };
 
 const fileContents = [

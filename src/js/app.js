@@ -652,11 +652,6 @@ window.App = {
     try {
       const isVoterPage = !!document.getElementById('voteStatus');
       let count = 0;
-      if (!isVoterPage) {
-        const countRaw = await this.readCountCandidates();
-        count = Number(countRaw);
-        window.countCandidates = count;
-      }
       let disableVoteAction = false;
 
       $('#boxCandidate').empty();
@@ -691,16 +686,21 @@ window.App = {
         }
       }
 
-      if (isVoterPage) {
-        // Voter dashboard: fetch candidates from DB for realtime / clean slate.
+      try {
+        // Prefer DB candidates for realtime UI. The blockchain is still used for vote txs.
         const res = await fetch(`${API_BASE}/candidates`);
+        if (!res.ok) throw new Error(`Candidate API failed: HTTP ${res.status}`);
         const data = await res.json();
         const items = (data && data.items) ? data.items : [];
+        if (items.length > 0) {
+          window.countCandidates = Math.max(...items.map((c) => Number(c.candidate_id) || 0));
+        }
         for (const c of items) {
           const id = Number(c.candidate_id);
           const name = c.name;
           const party = c.party;
-          const row = `
+          const voteCount = Number(c.vote_count || 0);
+          const row = isVoterPage ? `
             <div class="evm-row" role="listitem">
               <div class="evm-name">
                 <div class="primary">${name}</div>
@@ -720,11 +720,29 @@ window.App = {
                   ${disableVoteAction ? 'disabled' : ''}
                 >Vote</button>
               </div>
-            </div>`;
+            </div>` : `
+            <tr>
+              <td>
+                <input class="form-check-input" type="radio" name="candidate" value="${id}" id="c${id}"> ${name}
+              </td>
+              <td>${party}</td>
+              <td>${voteCount}</td>
+            </tr>`;
           $('#boxCandidate').append(row);
         }
-        return;
+        if (items.length > 0 || isVoterPage) {
+          return;
+        }
+      } catch (e) {
+        console.warn('Failed to load candidates from DB; falling back to blockchain:', e);
+        if (isVoterPage) {
+          throw e;
+        }
       }
+
+      const countRaw = await this.readCountCandidates();
+      count = Number(countRaw);
+      window.countCandidates = count;
 
       for (let i = 1; i <= count; i++) {
         try {

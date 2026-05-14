@@ -526,7 +526,7 @@ class AdminTools {
           `;
         }
       }
-      const source = isAudit ? 'audit data' : 'blockchain';
+      const source = isAudit ? 'audit data' : (data.source === 'database-fallback' ? 'database fallback' : 'blockchain');
       setStatus(byId('liveReportMsg'), `Live report from ${source} auto-refresh every 4s.`);
     } catch (e) {
       if (body) {
