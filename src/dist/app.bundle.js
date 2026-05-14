@@ -12760,18 +12760,25 @@ window.App = {
             return;
           }
           try {
-            await this.sendAddCandidateTx(nameCandidate, partyCandidate);
+            const txResult = await this.sendAddCandidateTx(nameCandidate, partyCandidate);
             // Persist candidate to MongoDB so the voter page can read the latest list.
             try {
-              const newIdRaw = await this.readCountCandidates();
-              const newId = Number(newIdRaw);
-              await fetch(`${API_BASE}/admin/candidates`, {
+              const newId = this.extractCandidateIdFromAddCandidateTx(txResult);
+              if (!newId) {
+                throw new Error('CandidateAdded event was not found in transaction receipt.');
+              }
+              const res = await fetch(`${API_BASE}/admin/candidates`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ candidate_id: newId, name: nameCandidate, party: partyCandidate }),
               });
+              if (!res.ok) {
+                const text = await res.text();
+                throw new Error(text || `Candidate API failed: HTTP ${res.status}`);
+              }
             } catch (e) {
               console.warn('DB candidate sync failed:', e);
+              alert(`Candidate was added on-chain, but could not be saved for vote.html: ${e?.message || e}`);
             }
             $('#name').val('');
             $('#party').val('');
@@ -13005,6 +13012,32 @@ window.App = {
     } catch {
       return null;
     }
+  },
+
+  extractCandidateIdFromAddCandidateTx: function (txResult) {
+    const directEvent = txResult?.events?.CandidateAdded;
+    const returnValues = Array.isArray(directEvent) ? directEvent[0]?.returnValues : directEvent?.returnValues;
+    const directId = this.normalizeUint(returnValues?.id || returnValues?.[0]);
+    if (directId) return Number(directId);
+
+    const decodedLogs = Array.isArray(txResult?.logs) ? txResult.logs : [];
+    for (const log of decodedLogs) {
+      if (log?.event !== 'CandidateAdded') continue;
+      const id = this.normalizeUint(log?.args?.id || log?.args?.[0]);
+      if (id) return Number(id);
+    }
+
+    const rawLogs = [
+      ...(Array.isArray(txResult?.receipt?.logs) ? txResult.receipt.logs : []),
+      ...(Array.isArray(txResult?.logs) ? txResult.logs : []),
+    ];
+    for (const log of rawLogs) {
+      const decoded = this.decodeEventLog(log, 'CandidateAdded');
+      const id = this.normalizeUint(decoded?.id || decoded?.[0]);
+      if (id) return Number(id);
+    }
+
+    return 0;
   },
 
   resolveCandidateMeta: async function (candidateID) {
@@ -13258,11 +13291,6 @@ window.App = {
     try {
       const isVoterPage = !!document.getElementById('voteStatus');
       let count = 0;
-      if (!isVoterPage) {
-        const countRaw = await this.readCountCandidates();
-        count = Number(countRaw);
-        window.countCandidates = count;
-      }
       let disableVoteAction = false;
 
       $('#boxCandidate').empty();
@@ -13297,16 +13325,21 @@ window.App = {
         }
       }
 
-      if (isVoterPage) {
-        // Voter dashboard: fetch candidates from DB for realtime / clean slate.
+      try {
+        // Prefer DB candidates for realtime UI. The blockchain is still used for vote txs.
         const res = await fetch(`${API_BASE}/candidates`);
+        if (!res.ok) throw new Error(`Candidate API failed: HTTP ${res.status}`);
         const data = await res.json();
         const items = (data && data.items) ? data.items : [];
+        if (items.length > 0) {
+          window.countCandidates = Math.max(...items.map((c) => Number(c.candidate_id) || 0));
+        }
         for (const c of items) {
           const id = Number(c.candidate_id);
           const name = c.name;
           const party = c.party;
-          const row = `
+          const voteCount = Number(c.vote_count || 0);
+          const row = isVoterPage ? `
             <div class="evm-row" role="listitem">
               <div class="evm-name">
                 <div class="primary">${name}</div>
@@ -13326,11 +13359,34 @@ window.App = {
                   ${disableVoteAction ? 'disabled' : ''}
                 >Vote</button>
               </div>
-            </div>`;
+            </div>` : `
+            <tr>
+              <td>
+                <input class="form-check-input" type="radio" name="candidate" value="${id}" id="c${id}"> ${name}
+              </td>
+              <td>${party}</td>
+              <td>${voteCount}</td>
+            </tr>`;
           $('#boxCandidate').append(row);
         }
+        if (items.length === 0) {
+          $('#boxCandidate').html(
+            isVoterPage
+              ? '<div style="padding:12px;color:#111827;font-weight:700;">No candidates available.</div>'
+              : '<tr><td colspan="3">No candidates available.</td></tr>'
+          );
+        }
         return;
+      } catch (e) {
+        console.warn('Failed to load candidates from DB; falling back to blockchain for admin/explorer only:', e);
+        if (isVoterPage) {
+          throw e;
+        }
       }
+
+      const countRaw = await this.readCountCandidates();
+      count = Number(countRaw);
+      window.countCandidates = count;
 
       for (let i = 1; i <= count; i++) {
         try {
