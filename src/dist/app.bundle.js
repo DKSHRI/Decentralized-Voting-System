@@ -12617,12 +12617,15 @@ const RPC_URL = String(rpcUrlOverride || 'https://ethereum-sepolia-rpc.publicnod
 const REQUIRED_CHAIN_ID = Number.parseInt(String(chainIdOverride || '11155111'), 10);
 const REQUIRED_CHAIN_HEX = `0x${REQUIRED_CHAIN_ID.toString(16)}`;
 const CONFIGURED_VOTING_ADDRESS = String(contractAddressOverride || '').trim();
+const EXPLORER_EVENT_BLOCK_LOOKBACK = 500000;
 
 window.App = {
   web3: null,
+  readonlyWeb3: null,
   provider: null,
   account: null,
   voting: null,
+  readonlyVoting: null,
   initPromise: null,
   providerListenersBound: false,
 
@@ -12968,12 +12971,45 @@ window.App = {
     return '';
   },
 
+  getReadonlyWeb3: function () {
+    if (!this.readonlyWeb3) {
+      this.readonlyWeb3 = new Web3(new Web3.providers.HttpProvider(RPC_URL));
+    }
+    return this.readonlyWeb3;
+  },
+
   getReadonlyVotingContract: function () {
-    const address = this.getVotingAddress();
+    const address = this.getVotingAddress() || CONFIGURED_VOTING_ADDRESS;
     if (!address) {
       throw new Error('Voting contract address is unavailable.');
     }
-    return new this.web3.eth.Contract(votingArtifacts.abi, address);
+    if (!this.readonlyVoting || String(this.readonlyVoting.options?.address || '').toLowerCase() !== String(address).toLowerCase()) {
+      const web3Ro = this.getReadonlyWeb3();
+      this.readonlyVoting = new web3Ro.eth.Contract(votingArtifacts.abi, address);
+    }
+    return this.readonlyVoting;
+  },
+
+  getContractEventsChunked: async function (contractRo, eventName, { fromBlock, toBlock = 'latest', step = 45000 } = {}) {
+    const web3Ro = this.getReadonlyWeb3();
+    const latestBlock = toBlock === 'latest'
+      ? Number(await web3Ro.eth.getBlockNumber())
+      : Number(toBlock);
+    const startBlock = fromBlock === undefined || fromBlock === null
+      ? Math.max(0, latestBlock - EXPLORER_EVENT_BLOCK_LOOKBACK)
+      : Math.max(0, Number(fromBlock || 0));
+    const allEvents = [];
+
+    for (let start = startBlock; start <= latestBlock; start += step + 1) {
+      const end = Math.min(start + step, latestBlock);
+      const chunkEvents = await contractRo.getPastEvents(eventName, {
+        fromBlock: start,
+        toBlock: end,
+      });
+      allEvents.push(...chunkEvents);
+    }
+
+    return allEvents;
   },
 
   getEventAbi: function (eventName) {
@@ -12987,7 +13023,8 @@ window.App = {
       if (!value) return '';
       if (value.startsWith('0x')) {
         try {
-          return this.web3.utils.hexToNumberString(value);
+          const web3ForUtils = this.web3 || this.getReadonlyWeb3();
+          return web3ForUtils.utils.hexToNumberString(value);
         } catch {
           return value;
         }
@@ -13046,7 +13083,12 @@ window.App = {
       return { candidateId: 0, name: 'Unknown', party: 'Unknown' };
     }
     try {
-      const cand = await this.readCandidate(idNum);
+      let cand;
+      if (this.voting) {
+        cand = await this.readCandidate(idNum);
+      } else {
+        cand = await this.getReadonlyVotingContract().methods.getCandidate(idNum).call();
+      }
       return {
         candidateId: idNum,
         name: String(cand[1] || 'Unknown'),
@@ -13164,23 +13206,20 @@ window.App = {
     };
   },
 
-  getPublicVoteEvents: async function ({ fromBlock = 0, toBlock = 'latest' } = {}) {
-    if (!this.web3 || !this.voting) {
-      await this.eventStart();
-    }
-
+  getPublicVoteEvents: async function ({ fromBlock, toBlock = 'latest' } = {}) {
     const contractRo = this.getReadonlyVotingContract();
+    const web3Ro = this.getReadonlyWeb3();
     const eventAbi = this.getEventAbi('VoteCast');
     let events = [];
 
     if (eventAbi) {
-      events = await contractRo.getPastEvents('VoteCast', { fromBlock, toBlock });
+      events = await this.getContractEventsChunked(contractRo, 'VoteCast', { fromBlock, toBlock });
     }
 
     if (!eventAbi || events.length === 0) {
       const [legacyVotes, legacyQrVotes] = await Promise.all([
-        contractRo.getPastEvents('Voted', { fromBlock, toBlock }),
-        contractRo.getPastEvents('VotedByQr', { fromBlock, toBlock }),
+        this.getContractEventsChunked(contractRo, 'Voted', { fromBlock, toBlock }),
+        this.getContractEventsChunked(contractRo, 'VotedByQr', { fromBlock, toBlock }),
       ]);
       if (events.length === 0) {
         events = [...legacyVotes, ...legacyQrVotes];
@@ -13200,7 +13239,7 @@ window.App = {
       if (!ts && blockNumber > 0) {
         if (!blockTsCache.has(blockNumber)) {
           try {
-            const block = await this.web3.eth.getBlock(blockNumber);
+            const block = await web3Ro.eth.getBlock(blockNumber);
             blockTsCache.set(blockNumber, Number(block?.timestamp || 0));
           } catch {
             blockTsCache.set(blockNumber, 0);
@@ -13235,25 +13274,43 @@ window.App = {
   },
 
   getCandidateResults: async function () {
-    if (!this.web3 || !this.voting) {
-      await this.eventStart();
-    }
-    const count = Number(await this.readCountCandidates());
-    const out = [];
-    for (let i = 1; i <= count; i++) {
-      try {
-        const c = await this.readCandidate(i);
-        out.push({
-          candidateId: Number(c[0]),
-          name: String(c[1] || 'Unknown'),
-          party: String(c[2] || 'Unknown'),
-          voteCount: Number(c[3] || 0),
-        });
-      } catch {
-        // skip broken candidate slots
+    try {
+      const contractRo = this.getReadonlyVotingContract();
+      const count = Number(await contractRo.methods.getCountCandidates().call());
+      const out = [];
+      for (let i = 1; i <= count; i++) {
+        try {
+          const c = await contractRo.methods.getCandidate(i).call();
+          out.push({
+            candidateId: Number(c[0]),
+            name: String(c[1] || 'Unknown'),
+            party: String(c[2] || 'Unknown'),
+            voteCount: Number(c[3] || 0),
+          });
+        } catch (e) {
+          console.warn(`Skipping candidate ${i}; contract read failed:`, e?.message || e);
+        }
       }
+      return out.sort((a, b) => b.voteCount - a.voteCount);
+    } catch (e) {
+      console.warn('On-chain candidate results failed; falling back to backend candidates:', e?.message || e);
+      return this.getBackendCandidateResults();
     }
-    return out.sort((a, b) => b.voteCount - a.voteCount);
+  },
+
+  getBackendCandidateResults: async function () {
+    const res = await fetch(`${API_BASE}/candidates`);
+    if (!res.ok) {
+      throw new Error(`Unable to load candidates from backend: HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    const items = Array.isArray(data?.items) ? data.items : [];
+    return items.map((c) => ({
+      candidateId: Number(c.candidate_id || c.id || 0),
+      name: String(c.name || 'Unknown'),
+      party: String(c.party || 'Unknown'),
+      voteCount: Number(c.vote_count || c.voteCount || 0),
+    })).sort((a, b) => b.voteCount - a.voteCount);
   },
 
   renderDates: async function () {
@@ -13542,8 +13599,12 @@ window.App = {
   }
 };
 
-// Auto-init on load
+// Auto-init on pages that need wallet-backed actions. The public explorer uses
+// readonly RPC helpers and should not prompt for a wallet on page load.
 window.addEventListener('load', () => {
+  if (document.getElementById('eventsBody') && document.getElementById('resultsBody')) {
+    return;
+  }
   window.App.eventStart();
 });
 

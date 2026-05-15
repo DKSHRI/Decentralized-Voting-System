@@ -33,12 +33,21 @@ class ExplorerPage {
     this.setStatus('Loading blockchain results and vote events...');
     try {
       await this.waitForApp();
-      const [results, events] = await Promise.all([
+      const [resultsResult, eventsResult] = await Promise.allSettled([
         window.App.getCandidateResults(),
-        window.App.getPublicVoteEvents({ fromBlock: 0, toBlock: 'latest' }),
+        window.App.getPublicVoteEvents({ toBlock: 'latest' }),
       ]);
+      const results = resultsResult.status === 'fulfilled' ? resultsResult.value : [];
+      const events = eventsResult.status === 'fulfilled' ? eventsResult.value : [];
       this.renderResults(results || []);
       this.renderEvents(events || []);
+      const errors = [resultsResult, eventsResult]
+        .filter((r) => r.status === 'rejected')
+        .map((r) => r.reason?.message || String(r.reason || 'unknown error'));
+      if (errors.length > 0) {
+        this.setStatus(`Explorer partially loaded. ${errors.join(' ')}`, true);
+        return;
+      }
       this.setStatus(`Loaded ${events.length} vote event(s).`);
     } catch (error) {
       this.setStatus(error?.message || 'Failed to load explorer.', true);
