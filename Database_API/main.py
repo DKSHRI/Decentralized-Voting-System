@@ -882,6 +882,8 @@ async def list_candidates():
         onchain_votes = {}
 
     candidate_rows = list(coll("candidates").find({}, {"_id": 0}).sort("candidate_id", ASCENDING))
+    # Create a map of candidate_id to database metadata for quick lookup
+    db_metadata = {int(row["candidate_id"]): row for row in candidate_rows}
 
     for row in candidate_rows:
         items.append(
@@ -898,15 +900,18 @@ async def list_candidates():
 
     if not items and onchain_candidates:
         for row in onchain_candidates:
+            candidate_id = int(row.get("candidate_id", 0) or 0)
+            # Enrich blockchain candidate with database metadata
+            db_data = db_metadata.get(candidate_id, {})
             items.append(
                 {
-                    "candidate_id": int(row.get("candidate_id", 0) or 0),
-                    "name": row.get("name"),
-                    "party": row.get("party"),
-                    "symbol": None,
+                    "candidate_id": candidate_id,
+                    "name": row.get("name") or db_data.get("name"),
+                    "party": row.get("party") or db_data.get("party"),
+                    "symbol": db_data.get("symbol"),
                     "vote_count": int(row.get("vote_count", 0) or 0),
-                    "party_symbol_image": None,
-                    "date_of_birth": None,
+                    "party_symbol_image": db_data.get("party_symbol_image"),
+                    "date_of_birth": db_data.get("date_of_birth"),
                 }
             )
     return {"items": items}
