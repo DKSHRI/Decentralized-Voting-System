@@ -91,6 +91,7 @@ VOTE_CAST_EVENT_TOPIC = "0xb4cfecf70861b7b150d8337780d34fb4cbc2114b5fb1fe51a5c5f
 mongo_client = None
 mongo_db = None
 collections = {}
+mongo_last_error = None
 
 
 def resolve_chain_rpc_urls():
@@ -142,6 +143,14 @@ def resolve_mongo_db_name(uri):
     except Exception:
         pass
     return "votingDB"
+
+
+def mask_mongo_uri(uri):
+    if not uri:
+        return "(empty)"
+    if not re.match(r"^mongodb(?:\+srv)?://", uri, flags=re.IGNORECASE):
+        return uri[:24] + ("..." if len(uri) > 24 else "")
+    return re.sub(r"//([^:]+):([^@]+)@", r"//\1:***@", uri)
 
 
 def utc_now():
@@ -569,34 +578,53 @@ def ensure_schema():
 
 
 def init_mongo():
-    global mongo_client, mongo_db, collections
+    global mongo_client, mongo_db, collections, mongo_last_error
     if mongo_db is not None:
         return mongo_db
 
     mongo_uri = resolve_mongo_uri()
     if not mongo_uri:
-        raise RuntimeError("MONGODB_URI or MONGO_URI must be configured for Database_API")
+        mongo_last_error = "MONGODB_URI or MONGO_URI must be configured for Database_API"
+        raise RuntimeError(mongo_last_error)
 
     timeout_ms = int(os.environ.get("MONGO_SERVER_SELECTION_TIMEOUT_MS", "10000"))
-    mongo_client = MongoClient(mongo_uri, serverSelectionTimeoutMS=timeout_ms)
-    mongo_client.admin.command("ping")
-    mongo_db = mongo_client[resolve_mongo_db_name(mongo_uri)]
-    collections = {
-        "voters": mongo_db["voters"],
-        "candidates": mongo_db["candidates"],
-        "candidate_nominations": mongo_db["candidate_nominations"],
-        "election_config": mongo_db["election_config"],
-        "vote_audit": mongo_db["vote_audit"],
-        "vote_report_live": mongo_db["vote_report_live"],
-        "counters": mongo_db["counters"],
-    }
-    ensure_schema()
-    return mongo_db
+    try:
+        mongo_client = MongoClient(mongo_uri, serverSelectionTimeoutMS=timeout_ms)
+        mongo_client.admin.command("ping")
+        mongo_db = mongo_client[resolve_mongo_db_name(mongo_uri)]
+        collections = {
+            "voters": mongo_db["voters"],
+            "candidates": mongo_db["candidates"],
+            "candidate_nominations": mongo_db["candidate_nominations"],
+            "election_config": mongo_db["election_config"],
+            "vote_audit": mongo_db["vote_audit"],
+            "vote_report_live": mongo_db["vote_report_live"],
+            "counters": mongo_db["counters"],
+        }
+        ensure_schema()
+        mongo_last_error = None
+        print(f"MongoDB connected using {mask_mongo_uri(mongo_uri)}")
+        return mongo_db
+    except Exception as err:
+        mongo_last_error = str(err)
+        print(f"MongoDB connection failed using {mask_mongo_uri(mongo_uri)}: {mongo_last_error}")
+        if mongo_client is not None:
+            mongo_client.close()
+        mongo_client = None
+        mongo_db = None
+        collections = {}
+        raise
 
 
 def coll(name):
     if mongo_db is None:
-        init_mongo()
+        try:
+            init_mongo()
+        except Exception as err:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Database unavailable. Check MONGODB_URI/MONGO_URI on Render. {err}",
+            )
     return collections[name]
 
 
@@ -764,7 +792,33 @@ def refresh_vote_rankings():
 
 @app.on_event("startup")
 def startup_event():
-    init_mongo()
+    try:
+        init_mongo()
+    except Exception as err:
+        print(f"Startup continuing without MongoDB: {err}")
+
+
+@app.get("/")
+async def root():
+    return {"service": "decentralized-voting-db-api", "health": "/healthz"}
+
+
+@app.get("/healthz")
+async def healthz():
+    global mongo_last_error
+    mongo_connected = False
+    try:
+        db = init_mongo()
+        db.client.admin.command("ping")
+        mongo_connected = True
+    except Exception as err:
+        mongo_last_error = str(err)
+
+    return {
+        "ok": mongo_connected,
+        "mongo": "connected" if mongo_connected else "disconnected",
+        "mongo_error": None if mongo_connected else mongo_last_error,
+    }
 
 
 @app.post("/admin/voters")
