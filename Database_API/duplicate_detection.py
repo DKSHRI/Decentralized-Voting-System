@@ -4,12 +4,17 @@ import cv2
 import numpy as np
 
 
-FRONTAL_FACE_CASCADE = cv2.CascadeClassifier(
-    os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml")
-)
-PROFILE_FACE_CASCADE = cv2.CascadeClassifier(
-    os.path.join(cv2.data.haarcascades, "haarcascade_profileface.xml")
-)
+def _create_face_cascade(filename):
+    cascade_factory = getattr(cv2, "CascadeClassifier", None)
+    cascade_data = getattr(getattr(cv2, "data", None), "haarcascades", "")
+    if cascade_factory is None or not cascade_data:
+        return None
+    cascade = cascade_factory(os.path.join(cascade_data, filename))
+    return None if cascade.empty() else cascade
+
+
+FRONTAL_FACE_CASCADE = _create_face_cascade("haarcascade_frontalface_default.xml")
+PROFILE_FACE_CASCADE = _create_face_cascade("haarcascade_profileface.xml")
 FACE_MATCH_THRESHOLD = float(os.environ.get("FACE_MATCH_THRESHOLD", "0.82"))
 FACE_IMAGE_SIZE = (64, 64)
 CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
@@ -31,7 +36,7 @@ def _load_grayscale_image_from_path(path):
 
 
 def _detect_with_cascade(cascade, image):
-    if image is None or cascade.empty():
+    if image is None or cascade is None:
         return []
     faces = cascade.detectMultiScale(
         image,
